@@ -40,6 +40,7 @@ class SpatialTransformer(nn.Module):
 
         # move channels dim to last position
         # also not sure why, but the channels need to be reversed
+        # here it works for both 2D and 3D...
         if len(shape) == 2:
             new_locs = new_locs.permute(0, 2, 3, 1)
             new_locs = new_locs[..., [1, 0]]
@@ -73,6 +74,16 @@ def generate_grid3D_tensor(shape):
     grid = torch.stack([z_grid, y_grid, x_grid], dim=0)
     return grid
 
+def generate_grid2D_tensor(shape):
+    x_grid = torch.linspace(-1., 1., shape[0])
+    y_grid = torch.linspace(-1., 1., shape[1])
+    x_grid, y_grid= torch.meshgrid(x_grid, y_grid)
+
+    # Note that default the dimension in the grid is reversed:
+    # z, y, x
+    grid = torch.stack([y_grid, x_grid], dim=0)
+    return grid
+
 def dice(array1, array2, labels):
     """
     Computes the dice overlap between two arrays for a given set of integer labels.
@@ -84,5 +95,6 @@ def dice(array1, array2, labels):
         bottom = np.maximum(bottom, np.finfo(float).eps)  # add epsilon
         dicem[idx] = top / bottom
     return dicem
+
 
 

@@ -1,5 +1,8 @@
 import torch
 import torch.nn.functional as F
+import math
+import numpy as np
+
 
 class NCC(torch.nn.Module):
     """
@@ -68,6 +71,8 @@ class NCC(torch.nn.Module):
         # return negative cc.
         return 1. - torch.mean(cc2).float()
 
+# The following function is from VoxelMorph!
+
 def JacboianDet(J):
     if J.size(-1) != 3:
         J = J.permute(0, 2, 3, 4, 1)
@@ -76,6 +81,7 @@ def JacboianDet(J):
     scale_factor = torch.tensor([J.size(1), J.size(2), J.size(3)]).to(J).view(1, 1, 1, 1, 3) * 1.
     J = J * scale_factor
 
+    # this step creats displacement by finite difference?
     dy = J[:, 1:, :-1, :-1, :] - J[:, :-1, :-1, :-1, :]
     dx = J[:, :-1, 1:, :-1, :] - J[:, :-1, :-1, :-1, :]
     dz = J[:, :-1, :-1, 1:, :] - J[:, :-1, :-1, :-1, :]
@@ -87,8 +93,79 @@ def JacboianDet(J):
     Jdet = Jdet0 - Jdet1 + Jdet2
     return Jdet
 
+def JacboianDet_2D(J):
+    if J.size(-1) != 2:
+        J = J.permute(0, 2, 3, 1)
+    J = J + 1
+    J = J / 2.
+    scale_factor = torch.tensor([J.size(1), J.size(2)]).to(J).view(1, 1, 1, 2) * 1.
+    J = J * scale_factor
+
+    # this step creats displacement by finite difference?
+    dy = J[:, 1:, :-1, :] - J[:, :-1, :-1, :]
+    dx = J[:, :-1, 1:, :] - J[:, :-1, :-1, :]
+    #dz = J[:, :-1, :-1, 1:, :] - J[:, :-1, :-1, :-1, :]
+
+    #Jdet0 = dx[:, :, :, :, 0] * (dy[:, :, :, :, 1] * dz[:, :, :, :, 2] - dy[:, :, :, :, 2] * dz[:, :, :, :, 1])
+    #Jdet1 = dx[:, :, :, :, 1] * (dy[:, :, :, :, 0] * dz[:, :, :, :, 2] - dy[:, :, :, :, 2] * dz[:, :, :, :, 0])
+    #Jdet2 = dx[:, :, :, :, 2] * (dy[:, :, :, :, 0] * dz[:, :, :, :, 1] - dy[:, :, :, :, 1] * dz[:, :, :, :, 0])
+
+    #Jdet = Jdet0 - Jdet1 + Jdet2
+    return dx[..., 0] * dy[..., 1] - dy[..., 0] * dx[..., 1]
+def jacobian_determinant(disp):
+    """
+    jacobian determinant of a displacement field.
+    NB: to compute the spatial gradients, we use np.gradient.
+
+    Parameters:
+        disp: 2D or 3D displacement field of size [*vol_shape, nb_dims], 
+              where vol_shape is of len nb_dims
+
+    Returns:
+        jacobian determinant (scalar)
+    """
+
+    # check inputs
+    volshape = disp.shape[:-1]
+    nb_dims = len(volshape)
+    assert len(volshape) in (2, 3), 'flow has to be 2D or 3D'
+
+    # compute grid
+    grid_lst = nd.volsize2ndgrid(volshape)
+    grid = np.stack(grid_lst, len(volshape))
+
+    # compute gradients
+    J = np.gradient(disp + grid)
+
+    # 3D glow
+    if nb_dims == 3:
+        dx = J[0]
+        dy = J[1]
+        dz = J[2]
+
+        # compute jacobian components
+        Jdet0 = dx[..., 0] * (dy[..., 1] * dz[..., 2] - dy[..., 2] * dz[..., 1])
+        Jdet1 = dx[..., 1] * (dy[..., 0] * dz[..., 2] - dy[..., 2] * dz[..., 0])
+        Jdet2 = dx[..., 2] * (dy[..., 0] * dz[..., 1] - dy[..., 1] * dz[..., 0])
+
+        return Jdet0 - Jdet1 + Jdet2
+
+    else:  # must be 2
+
+        dfdx = J[0]
+        dfdy = J[1]
+
+        return dfdx[..., 0] * dfdy[..., 1] - dfdy[..., 0] * dfdx[..., 1]
+
+
 def neg_Jdet_loss(J):
     Jdet = JacboianDet(J)
+    neg_Jdet = -1.0 * (Jdet - 0.5)
+    selected_neg_Jdet = F.relu(neg_Jdet)
+    return torch.mean(selected_neg_Jdet ** 2)
+
+def neg_Jdet_loss_2D(J):
+    Jdet = JacboianDet_2D(J)
     neg_Jdet = -1.0 * (Jdet - 0.5)
     selected_neg_Jdet = F.relu(neg_Jdet)
     return torch.mean(selected_neg_Jdet ** 2)
@@ -98,10 +175,84 @@ def smoothloss_loss(df):
      ((df[:, :, :, 1:, :] - df[:, :, :, :-1, :]) ** 2).mean() + \
      ((df[:, :, :, :, 1:] - df[:, :, :, :, :-1]) ** 2).mean())
 
+def smoothloss_loss_2D(df):
+    return (((df[:, :, 1:, :] - df[:, :, :-1, :]) ** 2).mean() + \
+     ((df[:, :, :, 1:] - df[:, :, :, :-1]) ** 2).mean())
+
+def magnitude_loss_2D(all_v):
+    all_v_x_2 = all_v[:, :, 0, :, :] * all_v[:, :, 0, :, :]
+    all_v_y_2 = all_v[:, :, 1, :, :] * all_v[:, :, 1, :, :]
+    #all_v_z_2 = all_v[:, :, 2, :, :, :] * all_v[:, :, 2, :, :, :]
+    all_v_magnitude = torch.mean(all_v_x_2 + all_v_y_2)
+    return all_v_magnitude
+
 def magnitude_loss(all_v):
     all_v_x_2 = all_v[:, :, 0, :, :, :] * all_v[:, :, 0, :, :, :]
     all_v_y_2 = all_v[:, :, 1, :, :, :] * all_v[:, :, 1, :, :, :]
     all_v_z_2 = all_v[:, :, 2, :, :, :] * all_v[:, :, 2, :, :, :]
     all_v_magnitude = torch.mean(all_v_x_2 + all_v_y_2 + all_v_z_2)
     return all_v_magnitude
+
+
+class NCC_vxm:
+    """
+    Local (over window) normalized cross correlation loss.
+    """
+
+    def __init__(self, win=None):
+        self.win = win
+
+    def loss(self, y_true, y_pred):
+
+        Ii = y_true
+        Ji = y_pred
+
+        # get dimension of volume
+        # assumes Ii, Ji are sized [batch_size, *vol_shape, nb_feats]
+        ndims = len(list(Ii.size())) - 2
+        assert ndims in [1, 2, 3], "volumes should be 1 to 3 dimensions. found: %d" % ndims
+
+        # set window size
+        win = [self.win] * ndims
+        # compute filters
+        sum_filt = torch.ones([1, 1, *win]).to("cuda")
+
+        pad_no = math.floor(win[0] / 2)
+
+        if ndims == 1:
+            stride = (1)
+            padding = (pad_no)
+        elif ndims == 2:
+            stride = (1, 1)
+            padding = (pad_no, pad_no)
+        else:
+            stride = (1, 1, 1)
+            padding = (pad_no, pad_no, pad_no)
+
+        # get convolution function
+        conv_fn = getattr(F, 'conv%dd' % ndims)
+
+        # compute CC squares
+        I2 = Ii * Ii
+        J2 = Ji * Ji
+        IJ = Ii * Ji
+
+        I_sum = conv_fn(Ii, sum_filt, stride=stride, padding=padding)
+        J_sum = conv_fn(Ji, sum_filt, stride=stride, padding=padding)
+        I2_sum = conv_fn(I2, sum_filt, stride=stride, padding=padding)
+        J2_sum = conv_fn(J2, sum_filt, stride=stride, padding=padding)
+        IJ_sum = conv_fn(IJ, sum_filt, stride=stride, padding=padding)
+
+        win_size = np.prod(win)
+        u_I = I_sum / win_size
+        u_J = J_sum / win_size
+
+        cross = IJ_sum - u_J * I_sum - u_I * J_sum + u_I * u_J * win_size
+        I_var = I2_sum - 2 * u_I * I_sum + u_I * u_I * win_size
+        J_var = J2_sum - 2 * u_J * J_sum + u_J * u_J * win_size
+
+        cc = cross * cross / (I_var * J_var + 1e-5)
+
+        return 1 -torch.mean(cc).float()
+    
 

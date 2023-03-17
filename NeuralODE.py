@@ -38,10 +38,14 @@ def Euler(z0, n_steps, f, step_size):
     '''
     z = z0
     for i_step in range(int(n_steps)):
+        #print(f'f(z) has a shape of {f(z).shape}')
+        #print(f'z has a shape of {z.shape}')
         z = z + step_size * f(z)
     return z
 
 class ODEF(nn.Module):
+    # this one is for flattening all parameters of a NN module. 
+    # please refer to https://github.com/msurtsukov/neural-ode/blob/master/Neural%20ODEs.ipynb
     def forward_with_grad(self, z, grad_outputs):
         """Compute f and a df/dz, a df/dp, a df/dt"""
         batch_size = z.shape[0]
@@ -182,3 +186,5 @@ class NeuralODE(nn.Module):
             return z
         else:
             return z[-1]
+
+# why not use dLdt?
